@@ -20,6 +20,7 @@ async function fetchJson(url, opts) {
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
+// Fetch transcript via Supadata
 app.post('/extract-audio', async (req, res) => {
   const { youtubeUrl, supadata_key } = req.body;
   if (!youtubeUrl || !supadata_key)
@@ -47,8 +48,9 @@ app.post('/extract-audio', async (req, res) => {
   }
 });
 
+// Gemini TTS proxy — uses Sadachbia voice by default
 app.post('/tts', async (req, res) => {
-  const { text, ttsKey, voiceName, languageCode, speakingRate } = req.body;
+  const { text, ttsKey, voiceName } = req.body;
   if (!text || !ttsKey)
     return res.status(400).json({ error: 'text and ttsKey are required' });
 
@@ -70,14 +72,18 @@ app.post('/tts', async (req, res) => {
     const audioChunks = [];
     for (const chunk of chunks) {
       const d = await fetchJson(
-        `https://texttospeech.googleapis.com/v1/text:synthesize?key=${ttsKey}`,
+        `https://texttospeech.googleapis.com/v1beta1/text:synthesize?key=${ttsKey}`,
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
+            model: 'gemini-2.5-flash-tts',
             input: { text: chunk },
-            voice: { languageCode: languageCode || 'en-US', name: voiceName || 'en-US-Studio-O' },
-            audioConfig: { audioEncoding: 'MP3', speakingRate: speakingRate || 1.0 },
+            voice: {
+              languageCode: 'en-US',
+              name: voiceName || 'Sadachbia',
+            },
+            audioConfig: { audioEncoding: 'MP3' },
           }),
         }
       );
