@@ -77,13 +77,13 @@ app.post('/tts', async (req, res) => {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            model: 'gemini-2.5-flash-tts',
             input: { text: chunk },
             voice: {
               languageCode: 'en-US',
-              name: voiceName || 'Sadachbia',
+              name: `en-US-${voiceName || 'Sadachbia'}`,
             },
             audioConfig: { audioEncoding: 'MP3' },
+            model: 'gemini-2.5-flash-tts',
           }),
         }
       );
