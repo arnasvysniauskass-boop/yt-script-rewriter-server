@@ -10,12 +10,9 @@ app.use(express.json({ limit: '10mb' }));
 const TMP_DIR = path.join(__dirname, 'tmp');
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR);
 
-async function fetchJson(url, opts) {
+async function doFetch(url, opts) {
   const { default: fetch } = await import('node-fetch');
-  const r = await fetch(url, opts);
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error?.message || data.error || `HTTP ${r.status}`);
-  return data;
+  return fetch(url, opts);
 }
 
 app.get('/health', (req, res) => res.json({ ok: true }));
@@ -27,8 +24,7 @@ app.post('/extract-audio', async (req, res) => {
     return res.status(400).json({ error: 'youtubeUrl and supadata_key are required' });
 
   try {
-    const { default: fetch } = await import('node-fetch');
-    const r = await fetch(
+    const r = await doFetch(
       `https://api.supadata.ai/v1/transcript?url=${encodeURIComponent(youtubeUrl)}&text=false`,
       { headers: { 'x-api-key': supadata_key } }
     );
@@ -48,7 +44,7 @@ app.post('/extract-audio', async (req, res) => {
   }
 });
 
-// Gemini TTS proxy — uses Sadachbia voice by default
+// Gemini TTS via Gemini API — supports Sadachbia and other Gemini voices
 app.post('/tts', async (req, res) => {
   const { text, ttsKey, voiceName } = req.body;
   if (!text || !ttsKey)
@@ -70,25 +66,40 @@ app.post('/tts', async (req, res) => {
 
   try {
     const audioChunks = [];
+    const voice = voiceName || 'Sadachbia';
+
     for (const chunk of chunks) {
-      const d = await fetchJson(
-        `https://texttospeech.googleapis.com/v1beta1/text:synthesize?key=${ttsKey}`,
+      const r = await doFetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${ttsKey}`,
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            input: { text: chunk },
-            voice: {
-              languageCode: 'en-US',
-              name: `en-US-${voiceName || 'Sadachbia'}`,
-            },
-            audioConfig: { audioEncoding: 'MP3' },
-            model: 'gemini-2.5-flash-tts',
+            contents: [{ parts: [{ text: chunk }] }],
+            generationConfig: {
+              responseModalities: ['AUDIO'],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: { voiceName: voice }
+                }
+              }
+            }
           }),
         }
       );
-      audioChunks.push(d.audioContent);
+
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error(e.error?.message || `Gemini TTS error ${r.status}`);
+      }
+
+      const data = await r.json();
+      // Extract base64 audio from response
+      const audioData = data?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (!audioData) throw new Error('No audio data returned from Gemini TTS');
+      audioChunks.push(audioData);
     }
+
     res.json({ audioChunks });
   } catch (e) {
     res.status(500).json({ error: 'TTS failed: ' + e.message });
