@@ -32,8 +32,13 @@ app.post('/extract-audio', async (req, res) => {
 
   const outPath = path.join(TMP_DIR, `audio_${Date.now()}.mp3`);
   const ytdlp = fs.existsSync('/usr/local/bin/yt-dlp') ? '/usr/local/bin/yt-dlp' : 'yt-dlp';
-   const cmd = `${ytdlp} -x --audio-format mp3 --audio-quality 5 -o "${outPath}" "${youtubeUrl}"`;
-
+let cookiesArg = '';
+if (process.env.YOUTUBE_COOKIES) {
+  const cookiePath = path.join(TMP_DIR, 'cookies.txt');
+  fs.writeFileSync(cookiePath, process.env.YOUTUBE_COOKIES);
+  cookiesArg = `--cookies "${cookiePath}"`;
+}
+const cmd = `${ytdlp} ${cookiesArg} -x --audio-format mp3 --audio-quality 5 -o "${outPath}" "${youtubeUrl}"`;
   exec(cmd, { timeout: 300000 }, async (err, stdout, stderr) => {
     if (err) {
       cleanTmp(outPath);
