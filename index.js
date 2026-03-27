@@ -31,7 +31,8 @@ app.post('/extract-audio', async (req, res) => {
     return res.status(400).json({ error: 'youtubeUrl and assemblyaiKey are required' });
 
   const outPath = path.join(TMP_DIR, `audio_${Date.now()}.mp3`);
-  const cmd = `yt-dlp -x --audio-format mp3 --audio-quality 5 -o "${outPath}" "${youtubeUrl}"`;
+  const ytdlp = fs.existsSync('/usr/local/bin/yt-dlp') ? '/usr/local/bin/yt-dlp' : 'yt-dlp';
+   const cmd = `${ytdlp} -x --audio-format mp3 --audio-quality 5 -o "${outPath}" "${youtubeUrl}"`;
 
   exec(cmd, { timeout: 300000 }, async (err, stdout, stderr) => {
     if (err) {
