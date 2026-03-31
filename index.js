@@ -25,28 +25,58 @@ async function doFetch(url, opts) {
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-// Submit YouTube URL directly to AssemblyAI — no yt-dlp needed
-// AssemblyAI fetches the audio from YouTube themselves
+// Extract YouTube audio URL using cobalt.tools API, then submit to AssemblyAI
 app.post('/extract-audio', async (req, res) => {
   const { youtubeUrl, assemblyaiKey } = req.body;
   if (!youtubeUrl || !assemblyaiKey)
     return res.status(400).json({ error: 'youtubeUrl and assemblyaiKey are required' });
 
   try {
-    // Submit the YouTube URL directly — AssemblyAI handles the download
+    // Step 1: Get direct audio URL from cobalt.tools (no yt-dlp needed)
+    const cobaltRes = await doFetch('https://api.cobalt.tools/', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'accept': 'application/json',
+      },
+      body: JSON.stringify({
+        url: youtubeUrl,
+        downloadMode: 'audio',
+        audioFormat: 'mp3',
+        audioBitrate: '128',
+      }),
+    });
+
+    if (!cobaltRes.ok) {
+      const e = await cobaltRes.json().catch(() => ({}));
+      throw new Error('Cobalt error: ' + (e.error?.code || cobaltRes.status));
+    }
+
+    const cobaltData = await cobaltRes.json();
+    let audioUrl = null;
+
+    if (cobaltData.status === 'stream' || cobaltData.status === 'redirect') {
+      audioUrl = cobaltData.url;
+    } else if (cobaltData.status === 'picker') {
+      audioUrl = cobaltData.picker?.[0]?.url;
+    }
+
+    if (!audioUrl) throw new Error('Could not extract audio URL from YouTube.');
+
+    // Step 2: Submit audio URL to AssemblyAI
     const d = await fetchJson('https://api.assemblyai.com/v2/transcript', {
       method: 'POST',
       headers: { 'authorization': assemblyaiKey, 'content-type': 'application/json' },
       body: JSON.stringify({
-        audio_url: youtubeUrl,
+        audio_url: audioUrl,
         speaker_labels: true,
         speech_models: ['universal-2'],
       }),
     });
-    // Return a fake uploadUrl and the transcriptId so the frontend flow still works
-    res.json({ uploadUrl: youtubeUrl, transcriptId: d.id });
+
+    res.json({ uploadUrl: audioUrl, transcriptId: d.id });
   } catch(e) {
-    res.status(500).json({ error: 'AssemblyAI submit failed: ' + e.message });
+    res.status(500).json({ error: 'Audio extraction failed: ' + e.message });
   }
 });
 
