@@ -1,4 +1,5 @@
 const express = require('express');
+const youtubeDl = require('youtube-dl-exec');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
@@ -56,51 +57,55 @@ app.get('/audio-job', async (req, res) => {
 });
 
 async function processAudioJob(jobId, videoId, assemblyaiKey) {
+  const outPath = path.join(TMP_DIR, `audio_${jobId}.mp3`);
   try {
-    const rapidKey = process.env.RAPIDAPI_KEY;
-    if (!rapidKey) throw new Error('RAPIDAPI_KEY not set on Railway.');
+    console.log('Downloading audio for', videoId);
 
-    // Poll RapidAPI until MP3 is ready — up to 15 min for long videos
-    let audioUrl = null;
-    const maxAttempts = 90; // 90 x 10s = 15 min
+    // Use youtube-dl-exec which bundles its own yt-dlp binary
+    await youtubeDl(`https://www.youtube.com/watch?v=${videoId}`, {
+      extractAudio: true,
+      audioFormat: 'mp3',
+      audioQuality: 5,
+      output: outPath,
+      noCheckCertificates: true,
+      noWarnings: true,
+      preferFreeFormats: true,
+      addHeader: ['referer:youtube.com', 'user-agent:googlebot'],
+    });
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      await new Promise(r => setTimeout(r, 10000));
+    if (!fs.existsSync(outPath)) throw new Error('Audio file not created after download.');
 
-      const rapidRes = await doFetch(
-        `https://youtube-mp36.p.rapidapi.com/dl?id=${videoId}`,
-        { headers: { 'x-rapidapi-key': rapidKey, 'x-rapidapi-host': 'youtube-mp36.p.rapidapi.com' } }
-      );
+    console.log('Upload to AssemblyAI...');
+    const { default: fetch } = await import('node-fetch');
+    const stat = fs.statSync(outPath);
+    const stream = fs.createReadStream(outPath);
 
-      if (!rapidRes.ok) {
-        console.log('RapidAPI HTTP error:', rapidRes.status);
-        continue;
-      }
+    const uploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
+      method: 'POST',
+      headers: { 'authorization': assemblyaiKey, 'content-type': 'audio/mpeg', 'content-length': String(stat.size) },
+      body: stream,
+    });
 
-      const rapidData = await rapidRes.json();
-      console.log('RapidAPI poll', attempt + 1, ':', rapidData.status, 'progress:', rapidData.progress);
+    cleanTmp(outPath);
 
-      if (rapidData.link && rapidData.status === 'ok') {
-        audioUrl = rapidData.link;
-        break;
-      }
-      if (rapidData.status === 'error' || rapidData.status === 'fail') {
-        throw new Error('MP3 conversion failed: ' + (rapidData.msg || 'unknown'));
-      }
+    if (!uploadRes.ok) {
+      const e = await uploadRes.json().catch(() => ({}));
+      throw new Error('AssemblyAI upload failed: ' + (e.error || uploadRes.status));
     }
 
-    if (!audioUrl) throw new Error('MP3 not ready after 15 minutes.');
+    const uploadData = await uploadRes.json();
 
-    // Submit to AssemblyAI
+    // Submit transcription
     const d = await fetchJson('https://api.assemblyai.com/v2/transcript', {
       method: 'POST',
       headers: { 'authorization': assemblyaiKey, 'content-type': 'application/json' },
-      body: JSON.stringify({ audio_url: audioUrl, speaker_labels: true, speech_models: ['universal-2'] }),
+      body: JSON.stringify({ audio_url: uploadData.upload_url, speaker_labels: true, speech_models: ['universal-2'] }),
     });
 
     audioJobs[jobId] = { status: 'done', transcriptId: d.id, error: null };
     console.log('Audio job done, transcriptId:', d.id);
   } catch(e) {
+    cleanTmp(outPath);
     console.log('Audio job error:', e.message);
     audioJobs[jobId] = { status: 'error', transcriptId: null, error: e.message };
   }
