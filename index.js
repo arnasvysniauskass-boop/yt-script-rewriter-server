@@ -40,6 +40,7 @@ app.post('/extract-audio', async (req, res) => {
       body: JSON.stringify({
         audio_url: youtubeUrl,
         speaker_labels: true,
+        speech_model: 'universal-2',
       }),
     });
     // Return a fake uploadUrl and the transcriptId so the frontend flow still works
