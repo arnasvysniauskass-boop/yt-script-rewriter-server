@@ -99,13 +99,32 @@ async function processAudioJob(jobId, videoId, assemblyaiKey) {
 
     if (!audioUrl) throw new Error('MP3 not ready after 15 minutes. Try a shorter video.');
 
-    console.log(`[${jobId}] Got audio URL, submitting to AssemblyAI...`);
+    // Download audio from RapidAPI and upload directly to AssemblyAI
+    // (RapidAPI URLs expire quickly, so we must re-download and upload)
+    console.log(`[${jobId}] Downloading audio from RapidAPI...`);
+    const { default: fetch } = await import('node-fetch');
+    const audioRes = await fetch(audioUrl);
+    if (!audioRes.ok) throw new Error('Failed to download audio from RapidAPI: ' + audioRes.status);
+    const audioBuffer = await audioRes.buffer();
 
+    console.log(`[${jobId}] Uploading audio to AssemblyAI... (${Math.round(audioBuffer.length/1024)}KB)`);
+    const uploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
+      method: 'POST',
+      headers: { 'authorization': assemblyaiKey, 'content-type': 'audio/mpeg', 'content-length': String(audioBuffer.length) },
+      body: audioBuffer,
+    });
+    if (!uploadRes.ok) {
+      const e = await uploadRes.json().catch(() => ({}));
+      throw new Error('AssemblyAI upload failed: ' + (e.error || uploadRes.status));
+    }
+    const uploadData = await uploadRes.json();
+
+    console.log(`[${jobId}] Submitting to AssemblyAI for transcription...`);
     const d = await fetchJson('https://api.assemblyai.com/v2/transcript', {
       method: 'POST',
       headers: { 'authorization': assemblyaiKey, 'content-type': 'application/json' },
       body: JSON.stringify({
-        audio_url: audioUrl,
+        audio_url: uploadData.upload_url,
         speaker_labels: true,
         speech_models: ['universal-2'],
       }),
