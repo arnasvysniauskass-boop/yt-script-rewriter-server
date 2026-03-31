@@ -63,6 +63,7 @@ async function processAudioJob(jobId, videoId, assemblyaiKey) {
 
     // Use youtube-dl-exec which bundles its own yt-dlp binary
     await youtubeDl(`https://www.youtube.com/watch?v=${videoId}`, {
+      pythonPath: 'python3',
       extractAudio: true,
       audioFormat: 'mp3',
       audioQuality: 5,
