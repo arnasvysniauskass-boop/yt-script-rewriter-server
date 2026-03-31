@@ -41,6 +41,8 @@ app.post('/extract-audio', async (req, res) => {
     const rapidKey = process.env.RAPIDAPI_KEY;
     if (!rapidKey) throw new Error('RAPIDAPI_KEY environment variable not set on Railway.');
 
+    // Try primary API first
+    let audioUrl = null;
     const rapidRes = await doFetch(
       `https://youtube-mp36.p.rapidapi.com/dl?id=${videoId}`,
       {
@@ -51,14 +53,31 @@ app.post('/extract-audio', async (req, res) => {
       }
     );
 
-    if (!rapidRes.ok) throw new Error('RapidAPI error: ' + rapidRes.status);
-    const rapidData = await rapidRes.json();
-
-    if (rapidData.status !== 'ok' || !rapidData.link) {
-      throw new Error('Could not get audio URL: ' + (rapidData.msg || 'unknown error'));
+    if (rapidRes.ok) {
+      const rapidData = await rapidRes.json();
+      if (rapidData.status === 'ok' && rapidData.link) {
+        audioUrl = rapidData.link;
+      }
     }
 
-    const audioUrl = rapidData.link;
+    // Fallback: try youtube-to-mp3-api
+    if (!audioUrl) {
+      const fallbackRes = await doFetch(
+        `https://youtube-to-mp3-api.p.rapidapi.com/mp3?url=https://www.youtube.com/watch?v=${videoId}`,
+        {
+          headers: {
+            'x-rapidapi-key': rapidKey,
+            'x-rapidapi-host': 'youtube-to-mp3-api.p.rapidapi.com',
+          },
+        }
+      );
+      if (fallbackRes.ok) {
+        const fallbackData = await fallbackRes.json();
+        audioUrl = fallbackData.url || fallbackData.link || fallbackData.download_url || null;
+      }
+    }
+
+    if (!audioUrl) throw new Error('Could not get audio URL from YouTube. Make sure you subscribed to the youtube-mp36 API on RapidAPI.');
 
     // Step 2: Submit audio URL to AssemblyAI
     const d = await fetchJson('https://api.assemblyai.com/v2/transcript', {
