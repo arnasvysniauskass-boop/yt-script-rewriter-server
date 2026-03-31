@@ -25,81 +25,86 @@ async function doFetch(url, opts) {
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-// Extract YouTube audio URL using cobalt.tools API, then submit to AssemblyAI
+// In-memory job store for async audio processing
+const audioJobs = {};
+
+// Start audio extraction — returns jobId immediately, processes in background
 app.post('/extract-audio', async (req, res) => {
   const { youtubeUrl, assemblyaiKey } = req.body;
   if (!youtubeUrl || !assemblyaiKey)
     return res.status(400).json({ error: 'youtubeUrl and assemblyaiKey are required' });
 
+  const videoIdMatch = youtubeUrl.match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([a-zA-Z0-9_-]{11})/);
+  if (!videoIdMatch) return res.status(400).json({ error: 'Invalid YouTube URL.' });
+  const videoId = videoIdMatch[1];
+
+  const jobId = videoId + '_' + Date.now();
+  audioJobs[jobId] = { status: 'processing', transcriptId: null, error: null };
+
+  // Process in background without blocking the response
+  processAudioJob(jobId, videoId, assemblyaiKey);
+
+  res.json({ jobId });
+});
+
+// Poll audio job status
+app.get('/audio-job', async (req, res) => {
+  const { jobId } = req.query;
+  const job = audioJobs[jobId];
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  res.json(job);
+});
+
+async function processAudioJob(jobId, videoId, assemblyaiKey) {
   try {
-    // Step 1: Extract video ID
-    const videoIdMatch = youtubeUrl.match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([a-zA-Z0-9_-]{11})/);
-    if (!videoIdMatch) throw new Error('Invalid YouTube URL.');
-    const videoId = videoIdMatch[1];
-
-    // Step 2: Get audio URL via RapidAPI YouTube MP3 downloader
     const rapidKey = process.env.RAPIDAPI_KEY;
-    if (!rapidKey) throw new Error('RAPIDAPI_KEY environment variable not set on Railway.');
+    if (!rapidKey) throw new Error('RAPIDAPI_KEY not set on Railway.');
 
-    // Poll youtube-mp36 API until audio is ready (it processes asynchronously)
+    // Poll RapidAPI until MP3 is ready — up to 15 min for long videos
     let audioUrl = null;
-    const maxAttempts = 12; // poll up to 12 times, 5s apart = 60s max
+    const maxAttempts = 90; // 90 x 10s = 15 min
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      if (attempt > 0) await new Promise(r => setTimeout(r, 5000));
+      await new Promise(r => setTimeout(r, 10000));
 
       const rapidRes = await doFetch(
         `https://youtube-mp36.p.rapidapi.com/dl?id=${videoId}`,
-        {
-          headers: {
-            'x-rapidapi-key': rapidKey,
-            'x-rapidapi-host': 'youtube-mp36.p.rapidapi.com',
-          },
-        }
+        { headers: { 'x-rapidapi-key': rapidKey, 'x-rapidapi-host': 'youtube-mp36.p.rapidapi.com' } }
       );
 
       if (!rapidRes.ok) {
-        if (attempt === maxAttempts - 1) throw new Error('RapidAPI error: ' + rapidRes.status);
+        console.log('RapidAPI HTTP error:', rapidRes.status);
         continue;
       }
 
       const rapidData = await rapidRes.json();
-      console.log('RapidAPI response:', JSON.stringify(rapidData));
+      console.log('RapidAPI poll', attempt + 1, ':', rapidData.status, 'progress:', rapidData.progress);
 
-      if (rapidData.link && (rapidData.status === 'ok' || rapidData.progress === 100)) {
+      if (rapidData.link && rapidData.status === 'ok') {
         audioUrl = rapidData.link;
         break;
       }
-
-      // If still processing, continue polling
-      if (rapidData.status === 'processing' || (rapidData.progress !== undefined && rapidData.progress < 100)) {
-        continue;
-      }
-
-      // If error status
       if (rapidData.status === 'error' || rapidData.status === 'fail') {
-        throw new Error('Audio conversion failed: ' + (rapidData.msg || 'unknown'));
+        throw new Error('MP3 conversion failed: ' + (rapidData.msg || 'unknown'));
       }
     }
 
-    if (!audioUrl) throw new Error('Audio URL not ready after 60 seconds. Try again.');
+    if (!audioUrl) throw new Error('MP3 not ready after 15 minutes.');
 
-    // Step 2: Submit audio URL to AssemblyAI
+    // Submit to AssemblyAI
     const d = await fetchJson('https://api.assemblyai.com/v2/transcript', {
       method: 'POST',
       headers: { 'authorization': assemblyaiKey, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        audio_url: audioUrl,
-        speaker_labels: true,
-        speech_models: ['universal-2'],
-      }),
+      body: JSON.stringify({ audio_url: audioUrl, speaker_labels: true, speech_models: ['universal-2'] }),
     });
 
-    res.json({ uploadUrl: audioUrl, transcriptId: d.id });
+    audioJobs[jobId] = { status: 'done', transcriptId: d.id, error: null };
+    console.log('Audio job done, transcriptId:', d.id);
   } catch(e) {
-    res.status(500).json({ error: 'Audio extraction failed: ' + e.message });
+    console.log('Audio job error:', e.message);
+    audioJobs[jobId] = { status: 'error', transcriptId: null, error: e.message };
   }
-});
+}
 
 // Submit transcript job (kept for compatibility but extract-audio now does everything)
 app.post('/submit-transcript', async (req, res) => {
