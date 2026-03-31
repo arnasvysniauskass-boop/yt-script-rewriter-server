@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const { exec } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
@@ -10,10 +9,6 @@ app.use(express.json({ limit: '10mb' }));
 
 const TMP_DIR = path.join(__dirname, 'tmp');
 if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR);
-
-function cleanTmp(filePath) {
-  try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch(e) {}
-}
 
 async function fetchJson(url, opts) {
   const { default: fetch } = await import('node-fetch');
@@ -30,72 +25,36 @@ async function doFetch(url, opts) {
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-// Download audio via yt-dlp and upload to AssemblyAI
+// Submit YouTube URL directly to AssemblyAI — no yt-dlp needed
+// AssemblyAI fetches the audio from YouTube themselves
 app.post('/extract-audio', async (req, res) => {
   const { youtubeUrl, assemblyaiKey } = req.body;
   if (!youtubeUrl || !assemblyaiKey)
     return res.status(400).json({ error: 'youtubeUrl and assemblyaiKey are required' });
 
-  const outPath = path.join(TMP_DIR, `audio_${Date.now()}.mp3`);
-  const ytdlp = fs.existsSync('/usr/local/bin/yt-dlp') ? '/usr/local/bin/yt-dlp' : 'yt-dlp';
-  let cookiesArg = '';
-  if (process.env.YOUTUBE_COOKIES) {
-    const cookiePath = path.join(TMP_DIR, 'cookies.txt');
-    fs.writeFileSync(cookiePath, process.env.YOUTUBE_COOKIES);
-    cookiesArg = `--cookies "${cookiePath}"`;
-  }
-  const denoPath = '/root/.deno/bin';
-  const cmd = `PATH=${denoPath}:/usr/local/bin:$PATH ${ytdlp} ${cookiesArg} -x --audio-format mp3 --audio-quality 5 -o "${outPath}" "${youtubeUrl}"`;
-
-  exec(cmd, { timeout: 300000 }, async (err, stdout, stderr) => {
-    if (err) {
-      cleanTmp(outPath);
-      return res.status(500).json({ error: 'yt-dlp failed: ' + (stderr || err.message) });
-    }
-    if (!fs.existsSync(outPath))
-      return res.status(500).json({ error: 'Audio file not found after download.' });
-
-    try {
-      const { default: fetch } = await import('node-fetch');
-      const stat = fs.statSync(outPath);
-      const stream = fs.createReadStream(outPath);
-
-      const uploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
-        method: 'POST',
-        headers: { 'authorization': assemblyaiKey, 'content-type': 'audio/mpeg', 'content-length': String(stat.size) },
-        body: stream,
-      });
-
-      cleanTmp(outPath);
-
-      if (!uploadRes.ok) {
-        const e = await uploadRes.json().catch(() => ({}));
-        return res.status(500).json({ error: 'AssemblyAI upload failed: ' + (e.error || uploadRes.status) });
-      }
-      const d = await uploadRes.json();
-      res.json({ uploadUrl: d.upload_url });
-    } catch(e) {
-      cleanTmp(outPath);
-      res.status(500).json({ error: 'Upload error: ' + e.message });
-    }
-  });
-});
-
-// Submit AssemblyAI transcription job with speaker diarization
-app.post('/submit-transcript', async (req, res) => {
-  const { uploadUrl, assemblyaiKey } = req.body;
-  if (!uploadUrl || !assemblyaiKey)
-    return res.status(400).json({ error: 'uploadUrl and assemblyaiKey are required' });
   try {
+    // Submit the YouTube URL directly — AssemblyAI handles the download
     const d = await fetchJson('https://api.assemblyai.com/v2/transcript', {
       method: 'POST',
       headers: { 'authorization': assemblyaiKey, 'content-type': 'application/json' },
-      body: JSON.stringify({ audio_url: uploadUrl, speaker_labels: true }),
+      body: JSON.stringify({
+        audio_url: youtubeUrl,
+        speaker_labels: true,
+      }),
     });
-    res.json({ transcriptId: d.id });
+    // Return a fake uploadUrl and the transcriptId so the frontend flow still works
+    res.json({ uploadUrl: youtubeUrl, transcriptId: d.id });
   } catch(e) {
-    res.status(500).json({ error: 'Submit failed: ' + e.message });
+    res.status(500).json({ error: 'AssemblyAI submit failed: ' + e.message });
   }
+});
+
+// Submit transcript job (kept for compatibility but extract-audio now does everything)
+app.post('/submit-transcript', async (req, res) => {
+  const { transcriptId } = req.body;
+  // Already submitted in extract-audio, just pass through
+  if (transcriptId) return res.json({ transcriptId });
+  res.status(400).json({ error: 'transcriptId required' });
 });
 
 // Poll transcription status
@@ -113,7 +72,7 @@ app.get('/poll-transcript', async (req, res) => {
   }
 });
 
-// Supadata transcript proxy (for fallback text-only use)
+// Supadata transcript proxy
 app.post('/get-transcript', async (req, res) => {
   const { youtubeUrl, supadata_key } = req.body;
   if (!youtubeUrl || !supadata_key)
