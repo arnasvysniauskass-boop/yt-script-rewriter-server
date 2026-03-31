@@ -32,41 +32,33 @@ app.post('/extract-audio', async (req, res) => {
     return res.status(400).json({ error: 'youtubeUrl and assemblyaiKey are required' });
 
   try {
-    // Step 1: Extract video ID from YouTube URL
+    // Step 1: Extract video ID
     const videoIdMatch = youtubeUrl.match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([a-zA-Z0-9_-]{11})/);
     if (!videoIdMatch) throw new Error('Invalid YouTube URL.');
     const videoId = videoIdMatch[1];
 
-    // Step 2: Get audio stream URL via yt-dlp JSON API (no download, just metadata)
-    // We use the YouTube audio manifest directly via a public API
-    const ytApiRes = await doFetch(
-      `https://www.youtube.com/youtubei/v1/player?key=AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w`,
+    // Step 2: Get audio URL via RapidAPI YouTube MP3 downloader
+    const rapidKey = process.env.RAPIDAPI_KEY;
+    if (!rapidKey) throw new Error('RAPIDAPI_KEY environment variable not set on Railway.');
+
+    const rapidRes = await doFetch(
+      `https://youtube-mp36.p.rapidapi.com/dl?id=${videoId}`,
       {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          videoId,
-          context: {
-            client: {
-              clientName: 'ANDROID',
-              clientVersion: '19.09.37',
-              androidSdkVersion: 30,
-            }
-          }
-        }),
+        headers: {
+          'x-rapidapi-key': rapidKey,
+          'x-rapidapi-host': 'youtube-mp36.p.rapidapi.com',
+        },
       }
     );
 
-    if (!ytApiRes.ok) throw new Error('Could not fetch YouTube video info.');
+    if (!rapidRes.ok) throw new Error('RapidAPI error: ' + rapidRes.status);
+    const rapidData = await rapidRes.json();
 
-    const ytData = await ytApiRes.json();
-    const formats = ytData?.streamingData?.adaptiveFormats || [];
-    const audioFormats = formats
-      .filter(f => f.mimeType?.startsWith('audio/') && f.url)
-      .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+    if (rapidData.status !== 'ok' || !rapidData.link) {
+      throw new Error('Could not get audio URL: ' + (rapidData.msg || 'unknown error'));
+    }
 
-    if (!audioFormats.length) throw new Error('No audio stream found for this video.');
-    const audioUrl = audioFormats[0].url;
+    const audioUrl = rapidData.link;
 
     // Step 2: Submit audio URL to AssemblyAI
     const d = await fetchJson('https://api.assemblyai.com/v2/transcript', {
