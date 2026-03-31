@@ -32,36 +32,41 @@ app.post('/extract-audio', async (req, res) => {
     return res.status(400).json({ error: 'youtubeUrl and assemblyaiKey are required' });
 
   try {
-    // Step 1: Get direct audio URL from cobalt.tools (no yt-dlp needed)
-    const cobaltRes = await doFetch('https://api.cobalt.tools/', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'accept': 'application/json',
-      },
-      body: JSON.stringify({
-        url: youtubeUrl,
-        downloadMode: 'audio',
-        audioFormat: 'mp3',
-        audioBitrate: '128',
-      }),
-    });
+    // Step 1: Extract video ID from YouTube URL
+    const videoIdMatch = youtubeUrl.match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([a-zA-Z0-9_-]{11})/);
+    if (!videoIdMatch) throw new Error('Invalid YouTube URL.');
+    const videoId = videoIdMatch[1];
 
-    if (!cobaltRes.ok) {
-      const e = await cobaltRes.json().catch(() => ({}));
-      throw new Error('Cobalt error: ' + (e.error?.code || cobaltRes.status));
-    }
+    // Step 2: Get audio stream URL via yt-dlp JSON API (no download, just metadata)
+    // We use the YouTube audio manifest directly via a public API
+    const ytApiRes = await doFetch(
+      `https://www.youtube.com/youtubei/v1/player?key=AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          videoId,
+          context: {
+            client: {
+              clientName: 'ANDROID',
+              clientVersion: '19.09.37',
+              androidSdkVersion: 30,
+            }
+          }
+        }),
+      }
+    );
 
-    const cobaltData = await cobaltRes.json();
-    let audioUrl = null;
+    if (!ytApiRes.ok) throw new Error('Could not fetch YouTube video info.');
 
-    if (cobaltData.status === 'stream' || cobaltData.status === 'redirect') {
-      audioUrl = cobaltData.url;
-    } else if (cobaltData.status === 'picker') {
-      audioUrl = cobaltData.picker?.[0]?.url;
-    }
+    const ytData = await ytApiRes.json();
+    const formats = ytData?.streamingData?.adaptiveFormats || [];
+    const audioFormats = formats
+      .filter(f => f.mimeType?.startsWith('audio/') && f.url)
+      .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
 
-    if (!audioUrl) throw new Error('Could not extract audio URL from YouTube.');
+    if (!audioFormats.length) throw new Error('No audio stream found for this video.');
+    const audioUrl = audioFormats[0].url;
 
     // Step 2: Submit audio URL to AssemblyAI
     const d = await fetchJson('https://api.assemblyai.com/v2/transcript', {
