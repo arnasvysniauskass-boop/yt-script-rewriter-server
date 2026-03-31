@@ -41,43 +41,48 @@ app.post('/extract-audio', async (req, res) => {
     const rapidKey = process.env.RAPIDAPI_KEY;
     if (!rapidKey) throw new Error('RAPIDAPI_KEY environment variable not set on Railway.');
 
-    // Try primary API first
+    // Poll youtube-mp36 API until audio is ready (it processes asynchronously)
     let audioUrl = null;
-    const rapidRes = await doFetch(
-      `https://youtube-mp36.p.rapidapi.com/dl?id=${videoId}`,
-      {
-        headers: {
-          'x-rapidapi-key': rapidKey,
-          'x-rapidapi-host': 'youtube-mp36.p.rapidapi.com',
-        },
-      }
-    );
+    const maxAttempts = 12; // poll up to 12 times, 5s apart = 60s max
 
-    if (rapidRes.ok) {
-      const rapidData = await rapidRes.json();
-      if (rapidData.status === 'ok' && rapidData.link) {
-        audioUrl = rapidData.link;
-      }
-    }
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 5000));
 
-    // Fallback: try youtube-to-mp3-api
-    if (!audioUrl) {
-      const fallbackRes = await doFetch(
-        `https://youtube-to-mp3-api.p.rapidapi.com/mp3?url=https://www.youtube.com/watch?v=${videoId}`,
+      const rapidRes = await doFetch(
+        `https://youtube-mp36.p.rapidapi.com/dl?id=${videoId}`,
         {
           headers: {
             'x-rapidapi-key': rapidKey,
-            'x-rapidapi-host': 'youtube-to-mp3-api.p.rapidapi.com',
+            'x-rapidapi-host': 'youtube-mp36.p.rapidapi.com',
           },
         }
       );
-      if (fallbackRes.ok) {
-        const fallbackData = await fallbackRes.json();
-        audioUrl = fallbackData.url || fallbackData.link || fallbackData.download_url || null;
+
+      if (!rapidRes.ok) {
+        if (attempt === maxAttempts - 1) throw new Error('RapidAPI error: ' + rapidRes.status);
+        continue;
+      }
+
+      const rapidData = await rapidRes.json();
+      console.log('RapidAPI response:', JSON.stringify(rapidData));
+
+      if (rapidData.link && (rapidData.status === 'ok' || rapidData.progress === 100)) {
+        audioUrl = rapidData.link;
+        break;
+      }
+
+      // If still processing, continue polling
+      if (rapidData.status === 'processing' || (rapidData.progress !== undefined && rapidData.progress < 100)) {
+        continue;
+      }
+
+      // If error status
+      if (rapidData.status === 'error' || rapidData.status === 'fail') {
+        throw new Error('Audio conversion failed: ' + (rapidData.msg || 'unknown'));
       }
     }
 
-    if (!audioUrl) throw new Error('Could not get audio URL from YouTube. Make sure you subscribed to the youtube-mp36 API on RapidAPI.');
+    if (!audioUrl) throw new Error('Audio URL not ready after 60 seconds. Try again.');
 
     // Step 2: Submit audio URL to AssemblyAI
     const d = await fetchJson('https://api.assemblyai.com/v2/transcript', {
