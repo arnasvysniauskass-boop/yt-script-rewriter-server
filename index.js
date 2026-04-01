@@ -89,20 +89,33 @@ async function processAudioJob(jobId, videoId, assemblyaiKey) {
       console.log(`[${jobId}] Poll ${attempt + 1}: status=${data.status} progress=${data.progress}`);
 
       if (data.link && data.status === 'ok') {
-        // Download immediately while link is fresh
         console.log(`[${jobId}] Link ready, downloading now...`);
         const { default: fetch } = await import('node-fetch');
-        const audioRes = await fetch(data.link);
-        if (!audioRes.ok) {
-          console.log(`[${jobId}] Download failed ${audioRes.status}, retrying...`);
-          continue;
+        // Try downloading up to 5 times immediately
+        let buf = null;
+        for (let dl = 0; dl < 5; dl++) {
+          const audioRes = await fetch(data.link, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0',
+              'Referer': 'https://youtube-mp36.p.rapidapi.com/',
+            }
+          });
+          if (audioRes.ok) {
+            buf = await audioRes.buffer();
+            console.log(`[${jobId}] Downloaded ${Math.round(buf.length/1024)}KB`);
+            break;
+          }
+          console.log(`[${jobId}] Download attempt ${dl+1} failed ${audioRes.status}`);
+          await new Promise(r => setTimeout(r, 500));
         }
-        audioUrl = data.link;
-        // Store buffer immediately
-        const buf = await audioRes.buffer();
-        audioJobs[jobId]._audioBuf = buf;
-        console.log(`[${jobId}] Downloaded ${Math.round(buf.length/1024)}KB`);
-        break;
+        if (buf) {
+          audioJobs[jobId]._audioBuf = buf;
+          audioUrl = data.link;
+          break;
+        }
+        // Link expired, poll again for a fresh one
+        console.log(`[${jobId}] All download attempts failed, polling for fresh link...`);
+        continue;
       }
       if (data.status === 'error' || data.status === 'fail') {
         throw new Error('MP3 conversion failed: ' + (data.msg || 'unknown'));
