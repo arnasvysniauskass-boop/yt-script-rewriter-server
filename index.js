@@ -89,7 +89,19 @@ async function processAudioJob(jobId, videoId, assemblyaiKey) {
       console.log(`[${jobId}] Poll ${attempt + 1}: status=${data.status} progress=${data.progress}`);
 
       if (data.link && data.status === 'ok') {
+        // Download immediately while link is fresh
+        console.log(`[${jobId}] Link ready, downloading now...`);
+        const { default: fetch } = await import('node-fetch');
+        const audioRes = await fetch(data.link);
+        if (!audioRes.ok) {
+          console.log(`[${jobId}] Download failed ${audioRes.status}, retrying...`);
+          continue;
+        }
         audioUrl = data.link;
+        // Store buffer immediately
+        const buf = await audioRes.buffer();
+        audioJobs[jobId]._audioBuf = buf;
+        console.log(`[${jobId}] Downloaded ${Math.round(buf.length/1024)}KB`);
         break;
       }
       if (data.status === 'error' || data.status === 'fail') {
@@ -99,13 +111,11 @@ async function processAudioJob(jobId, videoId, assemblyaiKey) {
 
     if (!audioUrl) throw new Error('MP3 not ready after 15 minutes. Try a shorter video.');
 
-    // Download audio from RapidAPI and upload directly to AssemblyAI
-    // (RapidAPI URLs expire quickly, so we must re-download and upload)
-    console.log(`[${jobId}] Downloading audio from RapidAPI...`);
+    // Use already-downloaded buffer
+    console.log(`[${jobId}] Using pre-downloaded audio buffer...`);
+    const audioBuffer = audioJobs[jobId]._audioBuf;
+    if (!audioBuffer) throw new Error('Audio buffer missing.');
     const { default: fetch } = await import('node-fetch');
-    const audioRes = await fetch(audioUrl);
-    if (!audioRes.ok) throw new Error('Failed to download audio from RapidAPI: ' + audioRes.status);
-    const audioBuffer = await audioRes.buffer();
 
     console.log(`[${jobId}] Uploading audio to AssemblyAI... (${Math.round(audioBuffer.length/1024)}KB)`);
     const uploadRes = await fetch('https://api.assemblyai.com/v2/upload', {
